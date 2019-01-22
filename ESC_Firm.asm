@@ -306,7 +306,7 @@ eeprom_end:	.byte	1
 		rjmp t1ovfl_int	; t1ovfl_int
 		reti		; t0ovfl_int
 		reti		; spi_int
-		rjmp urxc_int	; urxc
+		reti         	; urxc
 		reti		; udre
 		reti		; utxc
 		reti		; adc_int
@@ -617,44 +617,22 @@ eeprom_defaults_w:
 		in	@0, SFIOR
 		sbr	@0, (1<<ACME)	; set Analog Comparator Multiplexer Enable
 		out	SFIOR, @0
-	.if defined(mux_a) && defined(mux_b) && defined(mux_c)
 		cbi	ADCSRA, ADEN	; Disable ADC to make sure ACME works
-	.endif
-.endmacro
-.macro comp_adc_disable
-	.if !defined(mux_a) || !defined(mux_b) || !defined(mux_c)
-		cbi	ADCSRA, ADEN	; Disable ADC if we enabled it to get AIN1
-	.endif
 .endmacro
 .macro comp_adc_enable
 		sbi	ADCSRA, ADEN	; Eisable ADC to effectively disable ACME
 .endmacro
 .macro set_comp_phase_a
-	.if defined(mux_a)
 		ldi	@0, mux_a	; set comparator multiplexer to phase A
 		out	ADMUX, @0
-		comp_adc_disable
-	.else
-		comp_adc_enable
-	.endif
 .endmacro
 .macro set_comp_phase_b
-	.if defined(mux_b)
 		ldi	@0, mux_b	; set comparator multiplexer to phase B
 		out	ADMUX, @0
-		comp_adc_disable
-	.else
-		comp_adc_enable
-	.endif
 .endmacro
 .macro set_comp_phase_c
-	.if defined(mux_c)
 		ldi	@0, mux_c	; set comparator multiplexer to phase C
 		out	ADMUX, @0
-		comp_adc_disable
-	.else
-		comp_adc_enable
-	.endif
 .endmacro
 
 ;-- Timing and motor debugging macros ------------------------------------
@@ -736,44 +714,6 @@ eeprom_defaults_w:
 ;
 ; pwm_*_high and pwm_again are called when the particular on/off cycle
 ; is longer than will fit in 8 bits. This is tracked in tcnt2h.
-
-.if MOTOR_BRAKE || LOW_BRAKE
-pwm_brake_on:
-		cpse	tcnt2h, ZH
-		rjmp	pwm_again
-		in	i_sreg, SREG
-		nFET_brake i_temp1
-		ldi	i_temp1, 0xff
-		cp	off_duty_l, i_temp1	; Check for 0 off-time
-		cpc	off_duty_h, ZH
-		breq	pwm_brake_on1
-		ldi	ZL, pwm_brake_off	; Not full on, so turn it off next
-		lds	i_temp2, brake_sub
-		sub	sys_control_l, i_temp2
-		brne	pwm_brake_on1
-		neg	duty_l			; Increase duty
-		sbc	duty_h, i_temp1		; i_temp1 is 0xff aka -1
-		com	duty_l
-		com	off_duty_l		; Decrease off duty
-		sbc	off_duty_l, ZH
-		sbc	off_duty_h, ZH
-		com	off_duty_l
-pwm_brake_on1:	mov	tcnt2h, duty_h
-		out	SREG, i_sreg
-		out	TCNT2, duty_l
-		reti
-
-pwm_brake_off:
-		cpse	tcnt2h, ZH
-		rjmp	pwm_again
-		in	i_sreg, SREG
-		ldi	ZL, pwm_brake_on
-		mov	tcnt2h, off_duty_h
-		all_nFETs_off i_temp1
-		out	SREG, i_sreg
-		out	TCNT2, off_duty_l
-		reti
-.endif
 
 .if DEAD_TIME_HIGH > 7
 .equ	EXTRA_DEAD_TIME_HIGH = DEAD_TIME_HIGH - 7
@@ -980,56 +920,23 @@ rcpint_exit:	rcp_int_rising_edge i_temp1	; Set next int to rising edge
 	.endif
 ;-----bko-----------------------------------------------------------------
 ;-----bko-----------------------------------------------------------------
-urxc_int:
-; This is Bernhard's serial protocol implementation in the UART
-; version here: http://home.versanet.de/~b-konze/blc_6a/blc_6a.htm
-; This seems to be implemented for a project described here:
-; http://www.control.aau.dk/uav/reports/10gr833/10gr833_student_report.pdf
-; The UART runs at 38400 baud, N81. Input is ignored until >= 0xf5
-; is received, where we start counting to MOTOR_ID, at which
-; the received byte is used as throttle input. 0 is neutral,
-; >= 200 is FULL_POWER.
-	.if USE_UART
-		in	i_sreg, SREG
-		in	i_temp1, UDR
-		cpi	i_temp1, 0xf5		; Start throttle byte sequence
-		breq	urxc_x3d_sync
-		sbrs	flags0, UART_SYNC
-		rjmp	urxc_exit		; Throw away if not UART_SYNC
-		brcc	urxc_unknown
-		lds	i_temp2, motor_count
-		dec	i_temp2
-		brne	urxc_set_exit		; Skip when motor_count != 0
-		mov	rx_h, i_temp1		; Save 8-bit input
-		sbr	flags1, (1<<EVAL_RC)+(1<<UART_MODE)
-urxc_unknown:	cbr	flags0, (1<<UART_SYNC)
-		rjmp	urxc_exit
-urxc_x3d_sync:	sbr	flags0, (1<<UART_SYNC)
-		ldi	i_temp2, MOTOR_ID	; Start counting down from MOTOR_ID
-urxc_set_exit:	sts	motor_count, i_temp2
-urxc_exit:	out	SREG, i_sreg
-		reti
-	.endif
+
 ;-----bko-----------------------------------------------------------------
 ; beeper: timer0 is set to 1XXXs/count
 beep_f1:	ldi	temp2, 80
 		ldi	temp4, 200
-		RED_on
 beep_f1_on:	BpFET_on
 		AnFET_on
 		rcall	beep
 		brne	beep_f1_on
-		RED_off
 		ret
 
 beep_f2:	ldi	temp2, 100
 		ldi	temp4, 180
-		GRN_on
 beep_f2_on:	CpFET_on
 		BnFET_on
 		rcall	beep
 		brne	beep_f2_on
-		GRN_off
 		ret
 
 beep_f3:	ldi	temp2, 120
@@ -1042,14 +949,10 @@ beep_f3_on:	ApFET_on
 
 beep_f4:	ldi	temp2, 140
 beep_f4_freq:	ldi	temp4, 140
-beep_f4_fets:	RED_on
-		GRN_on
 beep_f4_on:	CpFET_on
 		AnFET_on
 		rcall	beep
 		brne	beep_f4_on
-		GRN_off
-		RED_off
 		ret
 
 		; Fall through
@@ -1221,32 +1124,17 @@ hardware_check:
 		clt
 
 		; First, check that all sense lines are low.
-		.if defined(mux_a)
 		ldi	XL, 1			; Error code 1: Phase A stuck high
 		ldi	temp4, mux_a
 		rcall	check_sense_low
-		.endif
 
-		.if defined(mux_b)
 		ldi	XL, 2			; Error code 2: Phase B stuck high
 		ldi	temp4, mux_b
 		rcall	check_sense_low
-		.endif
 
-		.if defined(mux_c)
 		ldi	XL, 3			; Error code 3: Phase C stuck high
 		ldi	temp4, mux_c
 		rcall	check_sense_low
-		.endif
-
-		.if !defined(mux_a) || !defined(mux_b) || !defined(mux_c)
-		ldi	XL, 4			; Error code 4: AIN1 stuck high
-		ldi2	YL, YH, MAX_CHECK_LOOPS
-check_ain1_low:	sbiw	YL, 1
-		sbic	PIND, 7			; Skip loop if AIN1 low
-		brne	check_ain1_low
-		rcall	hw_error_eq
-		.endif
 
 		ldi	XL, 5			; Error code 5: AIN0 stuck high
 		ldi2	YL, YH, MAX_CHECK_LOOPS
@@ -1267,7 +1155,6 @@ check_ain0_low:	sbiw	YL, 1
 		sbi	DDRD, 6
 		sbi	PORTD, 6		; Drive AIN0 high
 
-		.if defined(mux_a)
 		rcall	wait30ms		; There might be some capacitance
 		ldi	XL, 6			; Error code 6: Phase A low-side drive broken
 		ldi	temp4, mux_a
@@ -1277,9 +1164,7 @@ check_ain0_low:	sbiw	YL, 1
 		rcall	adc_read		; FET turn-on will easily beat ADC initialization
 		AnFET_off
 		rcall	hw_error_y_le_temp12
-		.endif
 
-		.if defined(mux_b)
 		rcall	wait30ms
 		ldi	XL, 7			; Error code 7: Phase B low-side drive broken
 		ldi	temp4, mux_b
@@ -1289,9 +1174,7 @@ check_ain0_low:	sbiw	YL, 1
 		rcall	adc_read		; FET turn-on will easily beat ADC initialization
 		BnFET_off
 		rcall	hw_error_y_le_temp12
-		.endif
 
-		.if defined(mux_c)
 		rcall	wait30ms
 		ldi	XL, 8			; Error code 8: Phase C low-side drive broken
 		ldi	temp4, mux_c
@@ -1301,12 +1184,10 @@ check_ain0_low:	sbiw	YL, 1
 		rcall	adc_read		; FET turn-on will easily beat ADC initialization
 		CnFET_off
 		rcall	hw_error_y_le_temp12
-		.endif
 
 		cbi	PORTD, 6		; Sink on AIN0 (help to pull down the outputs)
 		rcall	wait30ms
 
-		.if defined(mux_a)
 		ldi	XL, 9			; Error code 9: Phase A high-side drive broken
 		ldi	temp4, mux_a
 		rcall	adc_read
@@ -1315,9 +1196,7 @@ check_ain0_low:	sbiw	YL, 1
 		rcall	adc_read		; Waste time for high side to turn off
 		ApFET_off
 		rcall	hw_error_temp12_le_y
-		.endif
 
-		.if defined(mux_b)
 		ldi	XL, 10			; Error code 10: Phase B high-side drive broken
 		ldi	temp4, mux_b
 		rcall	adc_read
@@ -1326,9 +1205,7 @@ check_ain0_low:	sbiw	YL, 1
 		rcall	adc_read		; Waste time for high side to turn off
 		BpFET_off
 		rcall	hw_error_temp12_le_y
-		.endif
 
-		.if defined(mux_c)
 		ldi	XL, 11			; Error code 11: Phase C high-side drive broken
 		ldi	temp4, mux_c
 		rcall	adc_read
@@ -1337,7 +1214,6 @@ check_ain0_low:	sbiw	YL, 1
 		rcall	adc_read		; Waste time for high side to turn off
 		CpFET_off
 		rcall	hw_error_temp12_le_y
-		.endif
 
 		cbi	DDRD, 6			; Restore tristated AIN0
 		ret
@@ -1374,17 +1250,7 @@ hw_error_eq:
 hw_error:
 		mov	YL, XL
 hw_error1:
-		.if defined(red_led)
-		RED_on
-		rcall	wait120ms
-		RED_off
-		.elif defined(green_led)
-		GRN_on
-		rcall	wait120ms
-		GRN_off
-		.else
 		rcall	beep_f1			; Low frequency is safer
-		.endif
 		rcall	wait240ms
 		dec	YL
 		brne	hw_error1
@@ -1421,27 +1287,21 @@ adc_input_dump1:
 		ldi	temp4, 'H'
 		rcall	tx_byte
 
-		.if defined(mux_a)
 		ldi	temp4, 'A'
 		rcall	tx_byte
 		ldi	temp4, mux_a
 		rcall	adc_read
 		rcall	colon_hex_write
-		.endif
-		.if defined(mux_b)
 		ldi	temp4, 'B'
 		rcall	tx_byte
 		ldi	temp4, mux_b
 		rcall	adc_read
 		rcall	colon_hex_write
-		.endif
-		.if defined(mux_c)
 		ldi	temp4, 'C'
 		rcall	tx_byte
 		ldi	temp4, mux_c
 		rcall	adc_read
 		rcall	colon_hex_write
-		.endif
 		.if defined(mux_voltage)
 		ldi	temp4, '#'
 		rcall	tx_byte
@@ -1538,7 +1398,7 @@ colon_hex_write:
 ;-- Battery cell count ---------------------------------------------------
 ; Assuming a LiPo cell will never exceed 4.3V, we can estimate
 ; the number of cells by dividing the measured voltage by 4.3.
-.if defined(mux_voltage) && (DEBUG_ADC_DUMP || (!CELL_COUNT && BLIP_CELL_COUNT))
+.if (DEBUG_ADC_DUMP || (!CELL_COUNT && BLIP_CELL_COUNT))
 .set ADC_READ_NEEDED = 1
 
 adc_cell_count:
@@ -1600,10 +1460,6 @@ adc_wait:	sbic	ADCSRA, ADSC
 ; internal RC slows down when hot, making it impossible to reach full
 ; throttle.
 evaluate_rc_init:
-		.if USE_UART
-		sbrc	flags1, UART_MODE
-		rjmp	evaluate_rc_uart
-		.endif
 		.if RC_CALIBRATION && (USE_ICP || USE_INT0)
 		cbr	flags1, (1<<EVAL_RC)
 	; If input is above PROGRAM_RC_PULS, we try calibrating throttle
@@ -1670,11 +1526,7 @@ rc_prog6:	wdr
 		rcall	wait30ms
 		rcall	beep_f3
 		cpi	YL, low(puls_low_l+2)
-		.if RC_PULS_REVERSE
-		breq	rc_prog1		; Go back to get neutral pulse
-		.else
 		breq	rc_prog_done
-		.endif
 	; Three beeps: neutral pulse received
 		rcall	wait30ms
 		rcall	beep_f3
@@ -1684,18 +1536,11 @@ rc_prog_done:	rcall	eeprom_write_block
 ;-----bko-----------------------------------------------------------------
 ; These routines may clobber temp* and Y, but not X.
 evaluate_rc:
-		.if USE_UART
-		sbrc	flags1, UART_MODE
-		rjmp	evaluate_rc_uart
-		.endif
 	; Fall through to evaluate_rc_puls
 ;-----bko-----------------------------------------------------------------
 .if USE_ICP || USE_INT0
 evaluate_rc_puls:
 		cbr	flags1, (1<<EVAL_RC)+(1<<REVERSE)
-		.if MOTOR_BRAKE || LOW_BRAKE
-		sts	brake_want, ZH
-		.endif
 		movw	temp1, rx_l		; Atomic copy of rc pulse length
 		.if defined(MIN_RC_PULS)
 		cpi2	temp1, temp2, MIN_RC_PULS, temp3
@@ -1703,39 +1548,13 @@ evaluate_rc_puls:
 		ret
 puls_long_enough:
 		.endif
-		.if LOW_BRAKE
-		lds	YL, puls_low_l		; Lowest calibrated pulse (regardless of RC_PULS_REVERSE)
-		lds	YH, puls_low_h
-		sbiwx	YL, YH, RCP_LOW_DBAND * CPU_MHZ
-		brcs	puls_not_low_brake
-		cp	temp1, YL
-		cpc	temp2, YH
-		brcc	puls_not_low_brake
-		ldi	YL, 2
-		sts	brake_want, YL		; Set desired brake to 2 (low brake)
-		rjmp	puls_zero
-puls_not_low_brake:
-		.endif
 		lds	YL, neutral_l
 		lds	YH, neutral_h
 		sub	temp1, YL		; Offset input to neutral
 		sbc	temp2, YH
 		brcc	puls_plus
-		.if RC_PULS_REVERSE
-		sbr	flags1, (1<<REVERSE)
-		com	temp2			; Negate 16-bit value to get positive duty cycle
-		neg	temp1
-		sbci	temp2, -1
-		lds	temp3, rev_scale_l	; Load reverse scaling factor
-		lds	temp4, rev_scale_h
-		rjmp	puls_not_zero
-		.endif
 		; Fall through to stop/zero in no reverse case
 puls_zero_brake:
-		.if MOTOR_BRAKE
-		ldi	YL, 1
-		sts	brake_want, YL		; Set desired brake to 1 (neutral brake)
-		.endif
 puls_zero:	clr	YL
 		clr	YH
 		rjmp	rc_duty_set
@@ -1768,29 +1587,12 @@ rc_no_set_duty:	ldi	temp1, RCP_TOT
 ;-----bko-----------------------------------------------------------------
 
 ;-----bko-----------------------------------------------------------------
-.if USE_UART
-evaluate_rc_uart:
-		mov	YH, rx_h		; Copy 8-bit input
-		cbr	flags1, (1<<EVAL_RC)+(1<<REVERSE)
-		ldi	YL, 0
-		cpi	YH, 0
-		breq	rc_duty_set		; Power off
-	; Scale so that YH == 200 is MAX_POWER.
-		movw	temp1, YL
-		ldi2	temp3, temp4, 0x100 * (POWER_RANGE - MIN_DUTY) / 200
-		rjmp	rc_do_scale		; The rest of the code is common
-.endif
 ;-----bko-----------------------------------------------------------------
 ; Calculate the neutral offset and forward (and reverse) scaling factors
 ; to line up with the high/low (and neutral) pulse lengths.
 puls_scale:
-		.if RC_PULS_REVERSE
-		lds	temp1, puls_neutral_l
-		lds	temp2, puls_neutral_h
-		.else
 		lds	temp1, puls_low_l
 		lds	temp2, puls_low_h
-		.endif
 		sts	neutral_l, temp1
 		sts	neutral_h, temp2
 	; Find the distance to full throttle and fit it to match the
@@ -1803,17 +1605,6 @@ puls_scale:
 		rcall	puls_find_multiplicand
 		sts	fwd_scale_l, temp1
 		sts	fwd_scale_h, temp2
-		.if RC_PULS_REVERSE
-		lds	temp3, puls_neutral_l
-		lds	temp4, puls_neutral_h
-		lds	temp1, puls_low_l
-		lds	temp2, puls_low_h
-		sub	temp3, temp1
-		sbc	temp4, temp2
-		rcall	puls_find_multiplicand
-		sts	rev_scale_l, temp1
-		sts	rev_scale_h, temp2
-		.endif
 		ret
 ;-----bko-----------------------------------------------------------------
 ; Find the lowest 16.16 multiplicand that brings us to full throttle
@@ -2181,7 +1972,7 @@ control_start:
 
 ; Check cell count
 .if BLIP_CELL_COUNT
-	.if defined(mux_voltage) && !CELL_COUNT
+	.if !CELL_COUNT
 		rcall	adc_cell_count
 		cpi	temp1, 5
 		brlo	cell_count_good		; Detection of >=~5 LiPo cells becomes ambiguous based on charge state
@@ -2206,8 +1997,6 @@ cell_blipper1:
 
 control_disarm:
 	; LEDs off while disarmed
-		GRN_off
-		RED_off
 
 		rcall	puls_scale
 
@@ -2216,31 +2005,7 @@ control_disarm:
 		out	TIFR, temp1		; Clear TOIE1, OCIE1A, and TOIE2 flags
 		out	TIMSK, temp1		; Enable t1ovfl_int, t1oca_int, t2ovfl_int
 
-		.if defined(HK_PROGRAM_CARD)
-	; This program card seems to send data at 1200 baud N81,
-	; Messages start with 0xdd 0xdd, have 7 bytes of config,
-	; and end with 0xde, sent two seconds after power-up or
-	; after any jumper change.
-		.equ	BAUD_RATE = 1200
-		.equ	UBRR_VAL = F_CPU / BAUD_RATE / 16 - 1
-		outi	UBRRH, high(UBRR_VAL), temp1
-		outi	UBRRL, low(UBRR_VAL), temp1
-		sbi	UCSRB, RXEN		; Do programming card rx by polling
-		outi	UCSRC, (1<<URSEL)|(1<<UCSZ1)|(1<<UCSZ0), temp1	; N81
-		.endif
-
 	; Initialize input sources (i2c and/or rc-puls)
-		.if USE_UART && !defined(HK_PROGRAM_CARD)
-		.equ	BAUD_RATE = 38400
-		.equ	UBRR_VAL = F_CPU / BAUD_RATE / 16 - 1
-		outi	UBRRH, high(UBRR_VAL), temp1
-		outi	UBRRL, low(UBRR_VAL), temp1
-		sbi	UCSRB, RXEN		; We don't actually tx
-		outi	UCSRC, (1<<URSEL)|(1<<UCSZ1)|(1<<UCSZ0), temp1	; N81
-		in	temp1, UDR
-		sbi	UCSRA, RXC		; clear flag
-		sbi	UCSRB, RXCIE		; enable reception irq
-		.endif
 		.if USE_INT0 || USE_ICP
 		rcp_int_rising_edge temp1
 		rcp_int_enable temp1
@@ -2253,8 +2018,6 @@ i_rc_puls1:	clr	rc_timeout
 		sts	rct_boot, ZH
 		sts	rct_beacon, ZH
 i_rc_puls2:	wdr
-		.if defined(HK_PROGRAM_CARD)
-		.endif
 		sbrc	flags1, EVAL_RC
 		rjmp	i_rc_puls_rx
 		.if BOOT_JUMP
@@ -2277,10 +2040,6 @@ i_rc_puls_rx:	rcall	evaluate_rc_init
 		ldi	temp1, 10		; wait for this count of receiving power off
 		cp	rc_timeout, temp1
 		brlo	i_rc_puls2
-		.if USE_UART
-		sbrs	flags1, UART_MODE
-		cbi	UCSRB, RXEN		; Turn off receiver
-		.endif
 		.if USE_INT0 || USE_ICP
 		mov	temp1, flags1
 		andi	temp1, (1<<I2C_MODE)+(1<<UART_MODE)
@@ -2298,46 +2057,9 @@ i_rc_puls3:
 restart_control:
 		rcall	switch_power_off	; Disables PWM timer, turns off all FETs
 		cbr	flags0, (1<<SET_DUTY)	; Do not yet set duty on input
-		.if MOTOR_BRAKE || LOW_BRAKE
-		sts	brake_active, ZH	; No active brake
-		.endif
-		GRN_on				; Green on while armed and idle or braking
-		RED_off
 wait_for_power_on_init:
 		sts	rct_boot, ZH
 		sts	rct_beacon, ZH
-
-		.if MOTOR_BRAKE || LOW_BRAKE
-		lds	temp3, brake_want
-		lds	temp4, brake_active
-		cp	temp3, temp4
-		breq	wait_for_power_on
-
-		rcall	switch_power_off	; Disable any active brake
-		sts	brake_active, temp3	; Set new brake_active to brake_want
-
-		cpi	temp3, 1		; Neutral brake
-		brne	set_brake1
-		ldi	YL, 1 << BRAKE_SPEED
-		sts	brake_sub, YL
-		ldi2	YL, YH, BRAKE_POWER
-		rjmp	set_brake_duty
-
-set_brake1:	cpi	temp3, 2		; Thumb brake
-		brne	wait_for_power_on
-		ldi	YL, 1 << LOW_BRAKE_SPEED
-		sts	brake_sub, YL
-		ldi2	YL, YH, LOW_BRAKE_POWER
-
-set_brake_duty:	ldi2	temp1, temp2, MAX_POWER
-		sub	temp1, YL		; Calculate OFF duty
-		sbc	temp2, YH
-		rcall	set_new_duty_set
-		ldi	ZL, low(pwm_brake_off)	; Enable PWM brake mode
-		clr	tcnt2h
-		clr	sys_control_l		; Abused as duty update divisor
-		outi	TCCR2, T2CLK, temp1	; Enable PWM, cleared later by switch_power_off
-		.endif
 
 wait_for_power_on:
 		wdr
@@ -2366,8 +2088,6 @@ wait_for_power_rx:
 start_from_running:
 		rcall	switch_power_off
 		comp_init temp1			; init comparator
-		RED_off
-		GRN_off
 
 		ldi2	YL, YH, PWR_MIN_START	; Start with limited power to reduce the chance that we
 		movw	sys_control_l, YL	; align to a timing harmonic
@@ -2538,7 +2258,7 @@ start_from_running:
 		AnFET_on
 		sei
 .endmacro
-
+; sunit code start
 ;-----bko-----------------------------------------------------------------
 ; **** running control loop ****
 
@@ -2581,18 +2301,11 @@ run_reverse:	rcall	wait_for_low
 		com2com1
 
 run6:
-		.if MOTOR_BRAKE || LOW_BRAKE
-		lds	temp1, brake_want
-		cpse	temp1, ZH
-		rjmp	run_to_brake
-		.endif
 		lds	temp1, goodies
-		.if !MOTOR_BRAKE
 		; If last commutation timed out and power is off, return to restart_control
 		cpi	temp1, 0
 		sbrs	flags1, POWER_ON
 		breq	run_to_brake
-		.endif
 		movw	YL, sys_control_l	; Each time TIMING_MAX is hit, sys_control is lsr'd
 		adiw	YL, 0			; If zero, try starting over (with powerskipping)
 		breq	restart_run
@@ -2606,7 +2319,6 @@ run6:
 		rjmp	run6_3
 
 run6_2:		cbr	flags1, (1<<STARTUP)
-		RED_off
 		; Build up sys_control to MAX_POWER in steps.
 		; If SLOW_THROTTLE is disabled, this only limits
 		; initial start ramp-up; once running, sys_control
@@ -2639,7 +2351,6 @@ demag_timeout:
 		CpFET_off
 		.endif
 		all_nFETs_off temp1
-		RED_on
 		; Skip power for the next commutation. Note that we can't
 		; decrement powerskip because demag checking is skipped
 		; when powerskip is non-zero.
@@ -2666,7 +2377,6 @@ wait_timeout1:	rcall	load_timing
 		rcall	set_ocr1a_abs		; Set zero-crossing timeout to 240 degrees
 		rjmp	wait_for_edge2
 wait_timeout_run:
-		RED_on				; Turn on red LED
 wait_timeout_start:
 		sts	goodies, ZH		; Clear good commutation count
 		lds	temp4, start_delay
@@ -2733,7 +2443,6 @@ wait_pwm_enable:
 		cpi	ZL, low(pwm_wdr)
 		brne	wait_pwm_running
 		ldi	ZL, low(pwm_off)	; Re-enable PWM if disabled for powerskip or sync loss avoidance
-		RED_off				; wait_timeout would have happened if motor not spinning during powerskip
 wait_pwm_running:
 		sbrc	flags1, STARTUP
 		rjmp	wait_startup
@@ -2750,11 +2459,7 @@ wait_for_demag:
 		rcall	evaluate_rc
 		in	temp3, ACSR
 		eor	temp3, flags1
-		.if defined(HIGH_SIDE_PWM)
-		sbrs	temp3, ACO		; Check for opposite level (demagnetization)
-		.else
 		sbrc	temp3, ACO		; Check for opposite level (demagnetization)
-		.endif
 		rjmp	wait_for_demag
 wait_for_edge0:
 		rcall	load_timing
@@ -2799,21 +2504,8 @@ wait_for_edge2:	sbrs	flags0, OCT1_PENDING
 		sbrc	flags1, EVAL_RC
 		rcall	evaluate_rc
 		in	temp3, ACSR
-.if 0
-		; Visualize comparator output on the flag pin
-		sbrc	temp3, ACO
-		flag_on
-		nop
-		flag_off
-		sbrs	temp3, ACO
-		flag_on
-.endif
 		eor	temp3, flags1
-		.if defined(HIGH_SIDE_PWM)
-		sbrs	temp3, ACO
-		.else
 		sbrc	temp3, ACO
-		.endif
 		rjmp	wait_for_edge3
 		cp	XL, XH			; Not yet crossed
 		adc	XL, ZH			; Increment if not at zc_filter
