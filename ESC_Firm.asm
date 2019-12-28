@@ -64,9 +64,6 @@
 .equ	MIN_RC_PULS	= 100	; Throw away any pulses shorter than this
 .equ	MID_RC_PULS	= (STOP_RC_PULS + FULL_RC_PULS) / 2	; Neutral when RC_PULS_REVERSE = 1
 
-.equ	PROGRAM_RC_PULS	= (STOP_RC_PULS + FULL_RC_PULS) / 2	; Normally 1460
-
-
 .equ	MAX_DRIFT_PULS	= 10	; Maximum jitter/drift microseconds during programming
 
 ; Minimum PWM on-time (too low and FETs won't turn on, hard starting)
@@ -80,11 +77,6 @@
 .equ	PWR_MAX_START	= (POWER_RANGE/4) ; Power limit while starting (if still not running)
 .equ	PWR_MAX_RPM1	= (POWER_RANGE/4) ; Power limit when running slower than TIMING_RANGE1
 .equ	PWR_MAX_RPM2	= (POWER_RANGE/2) ; Power limit when running slower than TIMING_RANGE2
-
-.equ	BRAKE_POWER	= MAX_POWER*2/3	; Brake force is exponential, so start fairly high
-.equ	BRAKE_SPEED	= 3		; Speed to reach MAX_POWER, 0 (slowest) - 8 (fastest)
-.equ	LOW_BRAKE_POWER	= MAX_POWER*2/3
-.equ	LOW_BRAKE_SPEED	= 5
 
 .equ	TIMING_MIN	= 0x8000 ; 8192us per commutation
 .equ	TIMING_RANGE1	= 0x4000 ; 4096us per commutation
@@ -617,9 +609,7 @@ t1ovfl_int:	in	i_sreg, SREG
 		dec	rc_timeout
 t1ovfl_int1:	out	SREG, i_sreg
 		reti
-t1ovfl_int2:	lds	i_temp1, rct_boot
-		inc	i_temp1
-		sts	rct_boot, i_temp1
+t1ovfl_int2:
 		lds	i_temp1, rct_beacon
 		inc	i_temp1
 		sts	rct_beacon, i_temp1
@@ -1051,7 +1041,7 @@ evaluate_rc_init:
 	; If input is above PROGRAM_RC_PULS, we try calibrating throttle
 		ldi2	YL, YH, puls_high_l	; Start with high pulse calibration
 		sbrc	flags0, NO_CALIBRATION	; Is it safe to calibrate now?
-		rjmp	evaluate_rc_puls
+		rjmp	evaluate_rc
 		rjmp	rc_prog1
 rc_prog0:	rcall	wait240ms		; Wait for stick movement to settle
 	; Collect average of throttle input pulse length
@@ -1061,8 +1051,8 @@ rc_prog2:	mul	ZH, ZH			; Clear 24-bit result registers (0 * 0 -> temp5:temp6)
 		clr	temp7
 		cpi	YL, low(puls_high_l)	; Are we learning the high pulse?
 		brne	rc_prog3		; No, maybe the low pulse
-		cpi2	temp3, temp4, PROGRAM_RC_PULS * CPU_MHZ, temp1
-		brcs	evaluate_rc_puls	; Lower than PROGRAM_RC_PULS - exit programming
+		cpi2	temp3, temp4, MID_RC_PULS * CPU_MHZ, temp1
+		brcs	evaluate_rc     	; Lower than PROGRAM_RC_PULS - exit programming
 		ldi	temp1, 32 * 31/32	; Full speed pulse averaging count (slightly below exact)
 		rjmp	rc_prog5
 rc_prog3:	lds	temp1, puls_high_l	; If not learning the high pulse, we should stay below it
@@ -1122,31 +1112,25 @@ rc_prog_done:	rcall	eeprom_write_block
 ;-----bko-----------------------------------------------------------------
 ; These routines may clobber temp* and Y, but not X.
 evaluate_rc:
-	; Fall through to evaluate_rc_puls
-;-----bko-----------------------------------------------------------------
-evaluate_rc_puls:
-		cbr	flags1, (1<<EVAL_RC)+(1<<REVERSE)
+		cbr	flags1, (1<<EVAL_RC)
 		movw	temp1, rx_l		; Atomic copy of rc pulse length
 		cpi2	temp1, temp2, MIN_RC_PULS, temp3
 		brcc	puls_long_enough
 		ret
 puls_long_enough:
-		lds	YL, neutral_l
-		lds	YH, neutral_h
+		lds	YL, puls_low_l
+		lds	YH, puls_low_h
 		sub	temp1, YL		; Offset input to neutral
 		sbc	temp2, YH
 		brcc	puls_plus
 		; Fall through to stop/zero in no reverse case
-puls_zero_brake:
-puls_zero:	clr	YL
+          	clr	YL
 		clr	YH
 		rjmp	rc_duty_set
 puls_plus:
 		lds	temp3, fwd_scale_l	; Load forward scaling factor
 		lds	temp4, fwd_scale_h
-puls_not_zero:
-	; The following is used by all input modes
-rc_do_scale:	ldi2	YL, YH, MIN_DUTY	; Offset result so that 0 is MIN_DUTY
+            	ldi2	YL, YH, MIN_DUTY	; Offset result so that 0 is MIN_DUTY
 		rcall	mul_y_12x34		; Scaled result is now in Y
 		cpi2	YL, YH, MAX_POWER, temp1
 		brcs	rc_duty_set
@@ -1171,8 +1155,6 @@ rc_no_set_duty:	ldi	temp1, RCP_TOT
 puls_scale:
 		lds	temp1, puls_low_l
 		lds	temp2, puls_low_h
-		sts	neutral_l, temp1
-		sts	neutral_h, temp2
 	; Find the distance to full throttle and fit it to match the
 	; distance between FULL_RC_PULS and STOP_RC_PULS by walking
 	; for the lowest 16.16 multiplier that just brings us in range.
@@ -1465,8 +1447,7 @@ control_start:
 	; Wait for one of the input sources to give arming input
 
 i_rc_puls1:	clr	rc_timeout
-		cbr	flags1, (1<<EVAL_RC)+(1<<I2C_MODE)+(1<<UART_MODE)
-		sts	rct_boot, ZH
+		cbr	flags1, (1<<EVAL_RC)
 		sts	rct_beacon, ZH
 i_rc_puls2:	wdr
 		sbrc	flags1, EVAL_RC
@@ -1488,11 +1469,6 @@ i_rc_puls_rx:	rcall	evaluate_rc_init
 		ldi	temp1, 10		; wait for this count of receiving power off
 		cp	rc_timeout, temp1
 		brlo	i_rc_puls2
-		mov	temp1, flags1
-		andi	temp1, (1<<I2C_MODE)+(1<<UART_MODE)
-		breq	i_rc_puls3
-		rcp_int_disable temp1		; Turn off RC pulse interrupt
-i_rc_puls3:
 
 		rcall	beep_f4			; signal: rcpuls ready
 		rcall	beep_f4
@@ -1504,7 +1480,6 @@ restart_control:
 		rcall	switch_power_off	; Disables PWM timer, turns off all FETs
 		cbr	flags0, (1<<SET_DUTY)	; Do not yet set duty on input
 wait_for_power_on_init:
-		sts	rct_boot, ZH
 		sts	rct_beacon, ZH
 
 wait_for_power_on:
@@ -1689,7 +1664,7 @@ wait_timeout:
 		sbrc	flags1, STARTUP
 		rjmp	wait_timeout_start
 		cpi	XH, ZC_CHECK_FAST
-		brcs	wait_timeout_run
+		brcs	wait_timeout_start
 		ldi	XH, ZC_CHECK_FAST - 1	; Limit back-tracking
 		cp	XL, XH
 		brcc	wait_timeout1
@@ -1703,7 +1678,6 @@ wait_timeout1:	rcall	load_timing
 		adc	temp7, temp3
 		rcall	set_ocr1a_abs		; Set zero-crossing timeout to 240 degrees
 		rjmp	wait_for_edge2
-wait_timeout_run:
 wait_timeout_start:
 		sts	goodies, ZH		; Clear good commutation count
 		lds	temp4, start_delay
